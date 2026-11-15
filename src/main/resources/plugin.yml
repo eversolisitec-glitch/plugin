@@ -1,0 +1,9 @@
+name: CastrosDuper
+version: 1.0.0
+main: com.castros.duper.DuperPlugin
+api-version: '26.1'
+description: Mecanismo duper con atril, libro firmado, comparador y marcos.
+permissions:
+  duper.use:
+    description: Permite usar el mecanismo duper.
+    default: op

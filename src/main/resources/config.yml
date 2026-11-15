@@ -1,0 +1,13 @@
+# Título del libro firmado que va en el atril
+single-title: duper        # duplica 1 item
+stack-title: stackduper    # duplica el stack completo
+
+# Distancia (en bloques) desde el atril hasta los marcos
+radius: 3
+
+# Items que NO se pueden duplicar (las shulker boxes ya están bloqueadas por código)
+blacklist:
+  - NETHER_STAR
+  - ELYTRA
+  - TOTEM_OF_UNDYING
+  - ENCHANTED_GOLDEN_APPLE
