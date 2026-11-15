@@ -1,9 +1,11 @@
 package com.castros.duper;
 
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
-import org.bukkit.Tag;
+import org.bukkit.block.Barrel;
 import org.bukkit.block.Block;
 import org.bukkit.block.Lectern;
 import org.bukkit.block.data.Directional;
@@ -13,8 +15,12 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.hanging.HangingBreakEvent;
+import org.bukkit.event.inventory.InventoryAction;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.inventory.EquipmentSlot;
+import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.BookMeta;
 import org.bukkit.persistence.PersistentDataType;
@@ -24,20 +30,25 @@ import java.util.EnumSet;
 import java.util.Set;
 
 /**
- * Mecanismo duper:
- *  - Atril con un libro firmado titulado "duper" (1 item) o "stackduper" (stack completo).
- *  - Comparador delante del atril (activa el mecanismo).
- *  - Marcos de items cerca del atril (radio configurable).
+ * Dos mecanismos:
  *
- * Con el comparador puesto, al poner un item en un marco NO se gasta el de tu mano.
- * Para duplicar: quita el comparador y luego saca el item del marco (golpeándolo).
- * Si sacas el item con el comparador todavía puesto, el item desaparece sin duplicarse.
+ * 1) DUPER DE ATRIL
+ *    - Atril con un libro firmado titulado "duper" (1 item) o "stackduper" (stack completo).
+ *    - Comparador delante del atril (activa el mecanismo).
+ *    - Marcos de items cerca del atril (radio configurable).
+ *    Con el comparador puesto, al poner un item en un marco NO se gasta el de tu mano.
+ *    Para duplicar: quita el comparador y luego saca el item del marco (golpeándolo).
+ *
+ * 2) BARRIL "stack" (item shadowing)
+ *    Un barril renombrado "stack" en el yunque. Todo lo que metes en él es una COPIA:
+ *    el stack de tu mano / inventario NO se gasta. Luego sacas las copias normalmente.
  */
 public class DuperPlugin extends JavaPlugin implements Listener {
 
     private NamespacedKey ghostKey;
     private String singleTitle;
     private String stackTitle;
+    private String barrelName;
     private int radius;
     private final Set<Material> blacklist = EnumSet.noneOf(Material.class);
 
@@ -55,6 +66,7 @@ public class DuperPlugin extends JavaPlugin implements Listener {
         reloadConfig();
         singleTitle = getConfig().getString("single-title", "duper");
         stackTitle = getConfig().getString("stack-title", "stackduper");
+        barrelName = getConfig().getString("barrel-name", "stack");
         radius = Math.max(1, getConfig().getInt("radius", 3));
         blacklist.clear();
         for (String name : getConfig().getStringList("blacklist")) {
@@ -64,7 +76,13 @@ public class DuperPlugin extends JavaPlugin implements Listener {
         }
     }
 
-    // ---------- Detección del mecanismo ----------
+    private boolean isBlacklisted(ItemStack item) {
+        return item == null || item.getType().isAir() || blacklist.contains(item.getType());
+    }
+
+    // =====================================================================
+    //  1) DUPER DE ATRIL
+    // =====================================================================
 
     @SuppressWarnings("deprecation")
     private String bookTitle(Block b) {
@@ -97,12 +115,6 @@ public class DuperPlugin extends JavaPlugin implements Listener {
         return null;
     }
 
-    private boolean isBlacklisted(ItemStack item) {
-        return Tag.SHULKER_BOXES.isTagged(item.getType()) || blacklist.contains(item.getType());
-    }
-
-    // ---------- Poner el item en el marco (sin gastar el de la mano) ----------
-
     @EventHandler(ignoreCancelled = true)
     public void onFrameInteract(PlayerInteractEntityEvent e) {
         if (!(e.getRightClicked() instanceof ItemFrame frame)) return;
@@ -111,15 +123,11 @@ public class DuperPlugin extends JavaPlugin implements Listener {
 
         Player p = e.getPlayer();
         ItemStack hand = p.getInventory().getItemInMainHand();
-        if (hand.getType().isAir()) return;
+        if (isBlacklisted(hand)) return;
 
         Setup setup = findSetup(frame.getLocation());
         if (setup == null || !comparatorInFront(setup.lectern())) return;
         if (!p.hasPermission("duper.use")) return;
-        if (isBlacklisted(hand)) {
-            p.sendMessage("Ese item no se puede duplicar.");
-            return;
-        }
 
         e.setCancelled(true); // no se consume el item de la mano
 
@@ -131,8 +139,6 @@ public class DuperPlugin extends JavaPlugin implements Listener {
         frame.setItem(visual, false);
         frame.getPersistentDataContainer().set(ghostKey, PersistentDataType.BYTE_ARRAY, stored.serializeAsBytes());
     }
-
-    // ---------- Sacar el item del marco ----------
 
     /** Devuelve true si el marco tenía un item "fantasma" y ya fue liberado. */
     private boolean releaseGhost(ItemFrame frame) {
@@ -160,5 +166,84 @@ public class DuperPlugin extends JavaPlugin implements Listener {
     @EventHandler
     public void onFrameBreak(HangingBreakEvent e) {
         if (e.getEntity() instanceof ItemFrame frame) releaseGhost(frame);
+    }
+
+    // =====================================================================
+    //  2) BARRIL "stack" (item shadowing)
+    // =====================================================================
+
+    private boolean isStackBarrel(Inventory inv) {
+        if (!(inv.getHolder(false) instanceof Barrel barrel)) return false;
+        Component name = barrel.customName();
+        if (name == null) return false;
+        String plain = PlainTextComponentSerializer.plainText().serialize(name).trim();
+        return plain.equalsIgnoreCase(barrelName);
+    }
+
+    private void addCopy(Inventory inv, ItemStack item) {
+        int slot = inv.firstEmpty();
+        if (slot >= 0) inv.setItem(slot, item);
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onBarrelClick(InventoryClickEvent e) {
+        if (!(e.getWhoClicked() instanceof Player p)) return;
+        Inventory top = e.getView().getTopInventory();
+        if (!isStackBarrel(top)) return;
+        if (!p.hasPermission("duper.use")) return;
+
+        int raw = e.getRawSlot();
+        int size = top.getSize();
+        InventoryAction action = e.getAction();
+
+        // Shift-click desde tu inventario hacia el barril: se copia, no se mueve
+        if (raw >= size) {
+            if (action == InventoryAction.MOVE_TO_OTHER_INVENTORY) {
+                ItemStack cur = e.getCurrentItem();
+                if (isBlacklisted(cur)) return;
+                e.setCancelled(true);
+                addCopy(top, cur.clone());
+                p.updateInventory();
+            }
+            return;
+        }
+
+        // Clic dentro del barril con un item en el cursor / hotbar: se copia al slot
+        ItemStack cursor = e.getCursor();
+        switch (action) {
+            case PLACE_ALL, PLACE_SOME, PLACE_ONE, SWAP_WITH_CURSOR -> {
+                if (isBlacklisted(cursor)) return;
+                e.setCancelled(true);
+                ItemStack copy = cursor.clone();
+                if (action == InventoryAction.PLACE_ONE) copy.setAmount(1);
+                top.setItem(raw, copy);
+                p.updateInventory();
+            }
+            case HOTBAR_SWAP -> {
+                int btn = e.getHotbarButton();
+                if (btn < 0) return;
+                ItemStack hb = p.getInventory().getItem(btn);
+                if (isBlacklisted(hb)) return;
+                e.setCancelled(true);
+                top.setItem(raw, hb.clone());
+                p.updateInventory();
+            }
+            default -> { }
+        }
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onBarrelDrag(InventoryDragEvent e) {
+        if (!(e.getWhoClicked() instanceof Player p)) return;
+        Inventory top = e.getView().getTopInventory();
+        if (!isStackBarrel(top)) return;
+        if (!p.hasPermission("duper.use")) return;
+        int size = top.getSize();
+        for (int raw : e.getRawSlots()) {
+            if (raw < size) {
+                e.setCancelled(true); // arrastrar no se soporta en el barril duper
+                return;
+            }
+        }
     }
 }
